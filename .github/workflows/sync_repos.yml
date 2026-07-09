@@ -1,6 +1,8 @@
 name: Sync All Repos to Destination Account
 
 on:
+  schedule:
+    - cron: "0 */6 * * *"   # run every 6 hours
   workflow_dispatch:
 
 jobs:
