@@ -1,0 +1,117 @@
+name: Sync All Repos to Destination Account
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sync-all-repos:
+    runs-on: ubuntu-latest
+    env:
+      SRC_USER: "ursilapradeep"        # source account username
+      DEST_USER: "Ursilasuraj"        # destination account or org name
+      DEST_IS_ORG: "false"            # set "true" if DEST_USER is an org
+      SKIP_ARCHIVED: "true"           # set "false" to include archived repos
+      SKIP_FORKS: "true"              # set "false" to include forks
+      PER_PAGE: "100"
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq git curl
+
+      - name: Get list of all repos from source account
+        env:
+          SRC_TOKEN: ${{ secrets.SOURCE_TOKEN }}
+        run: |
+          set -euo pipefail
+          page=1
+          > repos.txt
+          while :; do
+            echo "Fetching page $page"
+            resp=$(curl -s -H "Authorization: token $SRC_TOKEN" \
+              "https://api.github.com/users/${SRC_USER}/repos?per_page=${PER_PAGE}&page=${page}")
+            count=$(echo "$resp" | jq 'length')
+            if [ "$count" -eq 0 ]; then
+              break
+            fi
+            echo "$resp" | jq -r '.[] | {name: .name, archived: .archived, fork: .fork} | @base64' \
+              | while read -r line; do
+                obj=$(echo "$line" | base64 --decode)
+                name=$(echo "$obj" | jq -r '.name')
+                archived=$(echo "$obj" | jq -r '.archived')
+                fork=$(echo "$obj" | jq -r '.fork')
+                if [ "${SKIP_ARCHIVED}" = "true" ] && [ "$archived" = "true" ]; then
+                  echo "Skipping archived repo $name"
+                  continue
+                fi
+                if [ "${SKIP_FORKS}" = "true" ] && [ "$fork" = "true" ]; then
+                  echo "Skipping fork $name"
+                  continue
+                fi
+                echo "$name" >> repos.txt
+              done
+            page=$((page+1))
+          done
+          echo "Found $(wc -l < repos.txt) repositories to process."
+
+      - name: Mirror clone, create destination repo if missing, and push
+        env:
+          SRC_TOKEN: ${{ secrets.SOURCE_TOKEN }}
+          DEST_TOKEN: ${{ secrets.DEST_TOKEN }}
+          SRC_USER: ${{ env.SRC_USER }}
+          DEST_USER: ${{ env.DEST_USER }}
+          DEST_IS_ORG: ${{ env.DEST_IS_ORG }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r repo || [ -n "$repo" ]; do
+            echo "==== Processing $repo ===="
+            # clone mirror
+            rm -rf "${repo}.git"
+            git clone --mirror "https://${SRC_TOKEN}@github.com/${SRC_USER}/${repo}.git" "${repo}.git"
+            cd "${repo}.git"
+
+            # check destination repo existence
+            status=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: token ${DEST_TOKEN}" \
+              "https://api.github.com/repos/${DEST_USER}/${repo}")
+
+            if [ "$status" -eq 404 ]; then
+              echo "Destination repo ${DEST_USER}/${repo} does not exist. Creating..."
+              if [ "${DEST_IS_ORG}" = "true" ]; then
+                create_resp=$(curl -s -H "Authorization: token ${DEST_TOKEN}" \
+                  -d "{\"name\":\"${repo}\",\"private\":false}" \
+                  "https://api.github.com/orgs/${DEST_USER}/repos")
+              else
+                create_resp=$(curl -s -H "Authorization: token ${DEST_TOKEN}" \
+                  -d "{\"name\":\"${repo}\",\"private\":false}" \
+                  "https://api.github.com/user/repos")
+              fi
+              # basic error check
+              if echo "$create_resp" | jq -e '.id' >/dev/null 2>&1; then
+                echo "Created ${DEST_USER}/${repo}"
+              else
+                echo "Failed to create ${DEST_USER}/${repo}:"
+                echo "$create_resp"
+                cd ..
+                rm -rf "${repo}.git"
+                continue
+              fi
+            else
+              echo "Destination repo exists (HTTP $status)."
+            fi
+
+            # push mirror to destination
+            echo "Pushing mirror to destination..."
+            git remote add dest "https://${DEST_TOKEN}@github.com/${DEST_USER}/${repo}.git" || true
+            git push --mirror "https://${DEST_TOKEN}@github.com/${DEST_USER}/${repo}.git" || {
+              echo "Push failed for ${repo}"
+            }
+
+            cd ..
+            rm -rf "${repo}.git"
+            echo "==== Done $repo ===="
+          done < repos.txt
+
+      - name: Cleanup
+        run: |
+          rm -f repos.txt
