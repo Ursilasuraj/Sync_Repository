@@ -13,7 +13,7 @@ jobs:
       DEST_USER: "Ursilasuraj"        # destination account or org name
       DEST_IS_ORG: "false"            # set "true" if DEST_USER is an org
       SKIP_ARCHIVED: "true"           # set "false" to include archived repos
-      SKIP_FORKS: "true"              # set "false" to include forks
+      SKIP_FORKS: "false"              # set "false" to include forks
       PER_PAGE: "100"
     steps:
       - name: Install dependencies
